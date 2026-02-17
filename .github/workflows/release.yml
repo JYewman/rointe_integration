@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Get changelog entry
+        id: changelog
+        run: |
+          # Extract the changelog section for this version
+          version="${GITHUB_REF#refs/tags/v}"
+          changelog=$(awk "/^## \[${version}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" CHANGELOG.md)
+          if [ -z "$changelog" ]; then
+            changelog="Release ${{ steps.version.outputs.version }}"
+          fi
+          # Use delimiter for multiline output
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$changelog" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create release archive
+        run: |
+          cd custom_components
+          zip -r ../rointe.zip rointe/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.version }}
+          body: ${{ steps.changelog.outputs.body }}
+          files: rointe.zip
+          generate_release_notes: false
