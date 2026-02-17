@@ -1,0 +1,12 @@
+{
+  "domain": "rointe",
+  "name": "Rointe Heaters",
+  "codeowners": ["@jyewman"],
+  "config_flow": true,
+  "documentation": "https://github.com/jyewman/rointe-hacs",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/jyewman/rointe-hacs/issues",
+  "requirements": ["websocket-client>=1.7.0"],
+  "version": "3.0.0"
+}
