@@ -80,14 +80,17 @@ This approach ensures the UI accurately reflects what the radiator is doing, eve
 
 ### HACS (Recommended)
 
-1. Open HACS in Home Assistant
-2. Click the three dots in the top right corner
-3. Select **Custom repositories**
-4. Add the repository URL: `https://github.com/JYewman/rointe_integration`
-5. Select **Integration** as the category
-6. Click **Add**
-7. Search for "Rointe" in HACS and install it
-8. Restart Home Assistant
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=JYewman&repository=rointe_integration&category=integration)
+
+1. Click the button above, or manually:
+   1. Open HACS in Home Assistant
+   2. Click the three dots in the top right corner
+   3. Select **Custom repositories**
+   4. Add the repository URL: `https://github.com/JYewman/rointe_integration`
+   5. Select **Integration** as the category
+   6. Click **Add**
+2. Search for "Rointe" in HACS and install it
+3. Restart Home Assistant
 
 ### Manual Installation
 
