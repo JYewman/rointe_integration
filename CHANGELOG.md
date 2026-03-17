@@ -1,116 +1,40 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-## [3.0.0] - 2026-02-16
-
-### Added
-- Full Nexa platform support via WebSocket API
-- Real-time device state updates
-- Schedule-aware temperature display
-- Effective power consumption sensors
-- Energy consumption sensors for Energy Dashboard integration
-
-### Changed
-- Migrated from REST API to WebSocket for Nexa devices
-- Improved state derivation from device schedules in AUTO mode
-- Enhanced HVAC action detection based on temperature probe readings
+## v3.0.1 (2026-03-17)
 
 ### Fixed
-- Temperature display now correctly reflects scheduled targets in AUTO mode
-- Power state detection improved for accurate heating status
+- **Nexa WebSocket commands now include `last_sync_datetime_app` timestamp** — radiators were ignoring commands sent via WebSocket because the sync timestamp was missing, causing them to treat updates as stale data rather than fresh commands from the app.
+- **WebSocket auth response verification** — both read and write operations now properly wait for and verify the Firebase auth response before sending commands, instead of blindly proceeding after a 300ms delay.
+- **Automatic re-authentication on token expiry** — when the Firebase refresh token expires, the integration now performs a full re-login using stored credentials instead of silently failing with "Permission denied" errors.
+- **Permission denied retry logic** — if a WebSocket read or write gets a "Permission denied" response, the integration forces a token refresh and retries once before giving up.
 
-### Breaking Changes
-- Entity IDs may change when migrating from v2.x
-- Nexa Firebase data handling completely rewritten
+## v3.0.0 (2026-02-17)
 
-## [2.2.0]
+### Added
+- Full Nexa API support (Rointe's new cloud platform)
+- Auto-detection of legacy vs Nexa accounts
+- WebSocket-based real-time communication for Nexa devices
+- Binary sensors (window open, boost active, timer active, heating, connected, etc.)
+- Number entities for comfort/eco/frost protection temperatures
+- Switch entities for window detection, silence mode, lock controls, etc.
+- Schedule-aware target temperature in AUTO mode
+- Energy consumption tracking via Nexa statistics API
+- Firmware update detection
 
 ### Changed
-- Updated to rointe-sdk 1.6.0
-- Fixed linting errors in the library
-- Improved API response error handling
+- Derive HVAC action from temperature differential instead of stale Firebase status
+- Improved device discovery and zone mapping
+- Better error handling throughout
 
-## [2.1.0]
+## v2.2.2
 
-### Added
-- Missing oval towel support (#15)
+- Bug fixes and stability improvements
 
-## [2.0.0]
+## v2.2.1-1
 
-### Changed
-- Updated to Home Assistant 2024.01
-- Various bug fixes
+- Minor fixes
 
-## [1.4.0]
+## v2.1.0
 
-### Added
-- Support for Oval Towel
-
-## [1.3.0]
-
-### Added
-- Support for sub-zones
-
-## [1.2.7]
-
-### Added
-- Experimental support for Belize/Olympia radiators
-
-## [1.2.6]
-
-### Changed
-- Extended debugging during setup
-
-## [1.2.5]
-
-### Fixed
-- Various bug fixes
-
-## [1.2.4]
-
-### Changed
-- Refresh from the main repository
-
-## [1.2.0]
-
-### Added
-- Show device's real name (product name)
-
-### Changed
-- Take into account not all firmware upgrades are possible
-- Forces updating the device registry
-
-## [1.1.0]
-
-### Added
-- Improved code documentation
-- Added climate icon
-
-### Removed
-- Dead code cleanup
-
-### Fixed
-- Model name capitalization
-
-## [1.0.10]
-
-### Added
-- Added missing entity descriptors
-- Configure scan interval
-- Raise ConfigEntryNotReady if unable to initialize from config
-
-### Changed
-- Bump rointe-sdk to v1.0.9b1
-- Decrease update messages log level
-
-### Fixed
-- Set devices as unavailable if communication errors occur
-- Remove excessive error messages
-
-## [1.0.8]
-
-### Fixed
-- Authentication refresh fix
-- Setting HVAC mode to Auto now sets the temperature to Comfort
-- Remove excessive logging
+- Added additional sensor entities
+- Improved error handling

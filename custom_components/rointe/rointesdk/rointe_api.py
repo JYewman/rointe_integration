@@ -52,6 +52,8 @@ class RointeAPI:
 
         self.username: Optional[str] = username
         self.password: Optional[str] = password
+        self._stored_username: Optional[str] = username
+        self._stored_password: Optional[str] = password
         self.api_type = (api_type or "auto").lower()
 
         self.refresh_token = None
@@ -124,8 +126,59 @@ class RointeAPI:
             self.auth_token_expire_date and self.auth_token_expire_date < now
         ):
             if not self._refresh_token():
-                return False
+                LOGGER.warning("Token refresh failed, attempting full re-authentication")
+                if not self._re_authenticate():
+                    return False
 
+        return True
+
+    def _re_authenticate(self) -> bool:
+        """Attempt a full re-authentication using stored credentials.
+
+        This is called when the refresh token has expired and we need
+        to do a fresh login. Requires that _stored_username and
+        _stored_password were saved during initialization.
+        """
+
+        if not self._stored_username or not self._stored_password:
+            LOGGER.error(
+                "Cannot re-authenticate: no stored credentials available"
+            )
+            return False
+
+        LOGGER.debug("Performing full re-authentication")
+        # Temporarily restore credentials for login
+        self.username = self._stored_username
+        self.password = self._stored_password
+
+        login_data = self._login_user()
+
+        if not login_data.success:
+            LOGGER.error("Re-authentication failed: %s", login_data.error_message)
+            self.username = None
+            self.password = None
+            return False
+
+        self.auth_token = login_data.data["auth_token"]
+        self.refresh_token = login_data.data["refresh_token"]
+        self.auth_token_expire_date = login_data.data["expires"]
+        self.local_id = login_data.data["local_id"]
+        self.nexa_token = login_data.data.get("nexa_token")
+        self.nexa_refresh_token = login_data.data.get("nexa_refresh_token")
+        self.firebase_base_url = login_data.data.get(
+            "firebase_base_url", FIREBASE_DEFAULT_URL
+        )
+        self.firebase_ws_url = login_data.data.get("firebase_ws_url")
+        self.firebase_app_key = login_data.data.get(
+            "firebase_app_key", FIREBASE_APP_KEY
+        )
+        self.use_nexa_ws = bool(login_data.data.get("use_nexa_ws", False))
+
+        # Clean credentials from memory (but keep stored copies)
+        self.username = None
+        self.password = None
+
+        LOGGER.info("Re-authentication successful")
         return True
 
     def _refresh_token(self) -> bool:
@@ -1342,7 +1395,7 @@ class RointeAPI:
         )
 
     def _write_via_websocket(
-        self, device_id: str, data: Dict[str, Any]
+        self, device_id: str, data: Dict[str, Any], _retry: bool = True
     ) -> ApiResponse:
         """Write data to Firebase via WebSocket (Nexa)."""
 
@@ -1377,12 +1430,20 @@ class RointeAPI:
         if not fields_to_write:
             return ApiResponse(True, None, None)
 
+        # Always include a sync timestamp so the radiator knows this is a fresh command
+        fields_to_write.append(
+            ("last_sync_datetime_app", round(datetime.now().timestamp() * 1000))
+        )
+
         results: Dict[int, Any] = {}
+        auth_holder: dict[str, Any] = {"status": None}
         errors: List[str] = []
-        request_id = [1]
-        expected_responses = [0]
+        auth_id = [0]
+        write_ids: List[int] = []
+        expected_write_responses = [0]
         ws_done = threading.Event()
         ws_connected = threading.Event()
+        auth_done = threading.Event()
         closing = [False]
 
         def on_message(ws, message):
@@ -1391,9 +1452,12 @@ class RointeAPI:
                 if msg.get("t") == "d" and "d" in msg:
                     data_block = msg["d"]
                     req_id = data_block.get("r")
-                    if req_id and "b" in data_block:
+                    if req_id == auth_id[0] and "b" in data_block:
+                        auth_holder["status"] = data_block["b"].get("s")
+                        auth_done.set()
+                    elif req_id and req_id in write_ids and "b" in data_block:
                         results[req_id] = data_block["b"].get("s")
-                        if len(results) >= expected_responses[0]:
+                        if len(results) >= expected_write_responses[0]:
                             ws_done.set()
             except Exception:
                 pass
@@ -1403,38 +1467,46 @@ class RointeAPI:
                 error_str = str(error)
                 if "NoneType" not in error_str:
                     errors.append(error_str)
+                    auth_done.set()
                     ws_done.set()
 
         def on_close(ws, code, msg):
+            auth_done.set()
             ws_done.set()
 
         def on_open(ws):
             ws_connected.set()
             try:
-                request_id[0] += 1
+                auth_id[0] = 1
                 ws.send(
                     json.dumps(
                         {
                             "t": "d",
                             "d": {
-                                "r": request_id[0],
+                                "r": auth_id[0],
                                 "a": "auth",
                                 "b": {"cred": self.auth_token},
                             },
                         }
                     )
                 )
-                expected_responses[0] += 1
-                time.sleep(0.3)
+            except Exception as e:
+                errors.append(str(e))
+                auth_done.set()
+                ws_done.set()
 
+        def send_writes(ws):
+            """Send write requests after auth is confirmed."""
+            try:
+                next_id = 2
                 for field, value in fields_to_write:
-                    request_id[0] += 1
+                    write_ids.append(next_id)
                     ws.send(
                         json.dumps(
                             {
                                 "t": "d",
                                 "d": {
-                                    "r": request_id[0],
+                                    "r": next_id,
                                     "a": "p",
                                     "b": {
                                         "p": f"/devices/{device_id}/data/{field}",
@@ -1444,7 +1516,8 @@ class RointeAPI:
                             }
                         )
                     )
-                    expected_responses[0] += 1
+                    expected_write_responses[0] += 1
+                    next_id += 1
                     time.sleep(0.1)
             except Exception as e:
                 errors.append(str(e))
@@ -1476,12 +1549,49 @@ class RointeAPI:
             safe_close(ws)
             return ApiResponse(False, None, "Connection timeout")
 
+        # Wait for auth response before sending writes
+        if not auth_done.wait(timeout=5):
+            LOGGER.warning("WebSocket write auth response timeout for %s", device_id)
+            safe_close(ws)
+            ws_thread.join(timeout=2)
+            return ApiResponse(False, None, "Auth response timeout")
+
+        if auth_holder["status"] != "ok":
+            LOGGER.warning(
+                "WebSocket write auth failed (status=%s) for %s",
+                auth_holder["status"],
+                device_id,
+            )
+            safe_close(ws)
+            ws_thread.join(timeout=2)
+
+            if _retry:
+                LOGGER.info("Forcing token refresh and retrying write for %s", device_id)
+                self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+                return self._write_via_websocket(device_id, data, _retry=False)
+            return ApiResponse(False, None, "WebSocket auth failed")
+
+        # Auth succeeded, send writes
+        send_writes(ws)
+
         ws_done.wait(timeout=8)
         safe_close(ws)
         ws_thread.join(timeout=2)
 
         if errors:
             return ApiResponse(False, None, "; ".join(errors))
+
+        # Check for permission denied in write results
+        for req_id, status in results.items():
+            if isinstance(status, str) and "permission_denied" in status.lower():
+                if _retry:
+                    LOGGER.info(
+                        "Permission denied on write, forcing re-auth and retrying for %s",
+                        device_id,
+                    )
+                    self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+                    return self._write_via_websocket(device_id, data, _retry=False)
+                return ApiResponse(False, None, "Permission denied after re-auth")
 
         return ApiResponse(True, results, None)
 
@@ -1495,7 +1605,7 @@ class RointeAPI:
             return cached["serialNumber"]
         return device.id
 
-    def _read_via_websocket(self, path: str) -> Any:
+    def _read_via_websocket(self, path: str, _retry: bool = True) -> Any:
         """Read data from Firebase via WebSocket (Nexa)."""
 
         if not self._ensure_valid_auth():
@@ -1511,10 +1621,13 @@ class RointeAPI:
             return None
 
         result_holder: dict[str, Any] = {"data": None}
+        auth_holder: dict[str, Any] = {"status": None}
         errors: List[str] = []
-        request_id = [1]
+        auth_id = [0]
+        read_id = [0]
         ws_done = threading.Event()
         ws_connected = threading.Event()
+        auth_done = threading.Event()
         closing = [False]
 
         def on_message(ws, message):
@@ -1522,7 +1635,11 @@ class RointeAPI:
                 msg = json.loads(message)
                 if msg.get("t") == "d" and "d" in msg:
                     data_block = msg["d"]
-                    if data_block.get("r") == request_id[0] and "b" in data_block:
+                    req_id = data_block.get("r")
+                    if req_id == auth_id[0] and "b" in data_block:
+                        auth_holder["status"] = data_block["b"].get("s")
+                        auth_done.set()
+                    elif req_id == read_id[0] and "b" in data_block:
                         result_holder["data"] = data_block["b"].get("d")
                         if isinstance(result_holder["data"], dict):
                             LOGGER.debug(
@@ -1530,9 +1647,14 @@ class RointeAPI:
                                 path,
                                 list(result_holder["data"].keys()),
                             )
+                        elif isinstance(result_holder["data"], str) and "permission denied" in result_holder["data"].lower():
+                            LOGGER.warning(
+                                "WebSocket read permission denied for %s",
+                                path,
+                            )
                         else:
-                            LOGGER.error(
-                                "WebSocket read unexpected type for %s: %s (%s)",
+                            LOGGER.debug(
+                                "WebSocket read for %s: type=%s value=%s",
                                 path,
                                 type(result_holder["data"]).__name__,
                                 str(result_holder["data"])[:200],
@@ -1546,36 +1668,44 @@ class RointeAPI:
                 error_str = str(error)
                 if "NoneType" not in error_str:
                     errors.append(error_str)
+                    auth_done.set()
                     ws_done.set()
 
         def on_close(ws, code, msg):
+            auth_done.set()
             ws_done.set()
 
         def on_open(ws):
             ws_connected.set()
             try:
-                request_id[0] += 1
+                auth_id[0] = 1
                 ws.send(
                     json.dumps(
                         {
                             "t": "d",
                             "d": {
-                                "r": request_id[0],
+                                "r": auth_id[0],
                                 "a": "auth",
                                 "b": {"cred": self.auth_token},
                             },
                         }
                     )
                 )
-                time.sleep(0.3)
+            except Exception as e:
+                errors.append(str(e))
+                auth_done.set()
+                ws_done.set()
 
-                request_id[0] += 1
+        def send_read(ws):
+            """Send the read request after auth is confirmed."""
+            try:
+                read_id[0] = 2
                 ws.send(
                     json.dumps(
                         {
                             "t": "d",
                             "d": {
-                                "r": request_id[0],
+                                "r": read_id[0],
                                 "a": "g",
                                 "b": {"p": path},
                             },
@@ -1612,12 +1742,47 @@ class RointeAPI:
             safe_close(ws)
             return None
 
+        # Wait for auth response
+        if not auth_done.wait(timeout=5):
+            LOGGER.warning("WebSocket auth response timeout for %s", path)
+            safe_close(ws)
+            ws_thread.join(timeout=2)
+            return None
+
+        if auth_holder["status"] != "ok":
+            LOGGER.warning(
+                "WebSocket auth failed (status=%s) for %s",
+                auth_holder["status"],
+                path,
+            )
+            safe_close(ws)
+            ws_thread.join(timeout=2)
+
+            # Force token expiry so next call triggers re-auth
+            if _retry:
+                LOGGER.info("Forcing token refresh and retrying read for %s", path)
+                self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+                return self._read_via_websocket(path, _retry=False)
+            return None
+
+        # Auth succeeded, send the read request
+        send_read(ws)
+
         ws_done.wait(timeout=8)
         safe_close(ws)
         ws_thread.join(timeout=2)
 
         if errors:
             LOGGER.error("WebSocket read error: %s", "; ".join(errors))
+            return None
+
+        # Check for permission denied in read response
+        if isinstance(result_holder["data"], str) and "permission denied" in result_holder["data"].lower():
+            if _retry:
+                LOGGER.info("Permission denied on read, forcing re-auth and retrying for %s", path)
+                self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+                return self._read_via_websocket(path, _retry=False)
+            LOGGER.error("Permission denied on read after re-auth for %s", path)
             return None
 
         return result_holder["data"]
