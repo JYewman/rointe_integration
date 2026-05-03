@@ -70,6 +70,7 @@ class RointeAPI:
         self._nexa_zone_device_map: Dict[str, List[str]] = {}  # zone_id -> [device_serials]
         self._nexa_device_zone_map: Dict[str, str] = {}  # device_serial -> zone_id
         self._nexa_installation_energy: Optional[Dict[str, Any]] = None  # cached stats
+        self._nexa_energy_lock = threading.Lock()
 
     def initialize_authentication(self) -> ApiResponse:
         """
@@ -1303,6 +1304,16 @@ class RointeAPI:
 
         return ApiResponse(True, data, None)
 
+    def invalidate_nexa_energy_cache(self) -> None:
+        """Drop the cached Nexa installation energy snapshot.
+
+        The device manager calls this at the start of each refresh cycle so
+        the next per-device fetch repopulates the cache from the API instead
+        of returning a stale snapshot from the previous cycle.
+        """
+        with self._nexa_energy_lock:
+            self._nexa_installation_energy = None
+
     def get_device_energy_from_nexa_stats(
         self, device_serial: str, installation_id: str
     ) -> ApiResponse:
@@ -1311,11 +1322,17 @@ class RointeAPI:
         Uses zone cost proportions to estimate per-device energy.
         """
 
-        # First, ensure we have statistics
+        # The device manager invalidates this cache at the start of each
+        # cycle, so an empty cache means we are the first device this cycle.
+        # Hold the lock while fetching so the other devices in the same
+        # cycle wait and read the populated cache instead of each firing
+        # their own HTTP request.
         if not self._nexa_installation_energy:
-            stats_response = self.get_nexa_energy_stats(installation_id)
-            if not stats_response.success:
-                return stats_response
+            with self._nexa_energy_lock:
+                if not self._nexa_installation_energy:
+                    stats_response = self.get_nexa_energy_stats(installation_id)
+                    if not stats_response.success:
+                        return stats_response
 
         stats = self._nexa_installation_energy
         if not stats:

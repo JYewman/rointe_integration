@@ -118,6 +118,12 @@ class RointeDeviceManager:
         user_device_ids: list[str] = installation_devices_response.data
         discovered_devices: dict[str, list[RointeDevice]] = {}
 
+        # Drop the previous cycle's Nexa installation energy snapshot so the
+        # first per-device energy fetch this cycle pulls fresh stats. Without
+        # this, the cache stays populated forever and the kWh sensor freezes
+        # at whatever value it had after the first refresh.
+        self.rointe_api.invalidate_nexa_energy_cache()
+
         # device_id -> (base data future, energy data future)
         device_data_futures: dict[str, tuple[asyncio.Future, asyncio.Future]] = {}
         pending_futures: list[asyncio.Future] = []

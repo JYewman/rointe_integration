@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.0.3 (2026-05-03)
+
+### Fixed
+- **Nexa energy sensor froze after the first refresh** — `_nexa_installation_energy` was cached on first fetch but never invalidated, so every subsequent refresh cycle returned the same kWh value forever. The device manager now invalidates the cache at the start of each cycle, and the per-device fetch holds a lock while repopulating it so all devices in the same cycle share a single HTTP call instead of stampeding the Nexa statistics endpoint.
+
 ## v3.0.2 (2026-05-03)
 
 ### Fixed
