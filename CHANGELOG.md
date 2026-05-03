@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.0.2 (2026-05-03)
+
+### Fixed
+- **Schedule status sensor crash on legacy (list-format) schedules** — `_get_schedule_status` assumed the schedule was always a dict (Nexa format) and called `.get()` on it, raising `AttributeError: 'list' object has no attribute 'get'` for legacy accounts. Now delegates to `RointeDevice.get_current_schedule_mode()`, which already handles both list and dict formats.
+
 ## v3.0.1 (2026-03-17)
 
 ### Fixed

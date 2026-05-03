@@ -23,6 +23,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.typing import StateType
 
 from .rointesdk.device import RointeDevice
+from .rointesdk.model import ScheduleMode
 
 
 @dataclass
@@ -83,24 +84,12 @@ def _get_effective_power(device: RointeDevice) -> float:
 
 def _get_schedule_status(device: RointeDevice) -> str:
     """Get current schedule block."""
-    from .rointesdk import utils
-    day_time = utils.now()
-    day_of_week = day_time.weekday()
-    hour_index = day_time.hour
-    
-    if not device.schedule or len(device.schedule) <= day_of_week:
-        return "unknown"
-    
-    day_schedule = device.schedule.get(str(day_of_week), "")
-    if len(day_schedule) <= hour_index:
-        return "unknown"
-    
-    mode_char = day_schedule[hour_index]
-    if mode_char == "C":
+    mode = device.get_current_schedule_mode()
+    if mode == ScheduleMode.COMFORT:
         return "comfort"
-    elif mode_char == "E":
+    if mode == ScheduleMode.ECO:
         return "eco"
-    elif mode_char == "O":
+    if mode == ScheduleMode.NONE:
         return "off"
     return "unknown"
 
