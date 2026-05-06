@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.0.4 (2026-05-06)
+
+### Fixed
+- **Climate entity stuck at OFF for Connect (legacy) radiators** — `RointeDevice.update_data` was decoding the `power` field as a Nexa integer code (1=standby, 2=heating). Because `bool` is a subclass of `int` in Python, `int(True)` yields `1`, so a Connect radiator reporting `power=True` was being misread as Nexa standby and `self.power` was set to `False` on every refresh. The climate entity therefore reported `HVACMode.OFF` and `target_temperature=None`, even though sensors and the preset switch (which don't read `power`) updated correctly. Now we check `isinstance(power_val, bool)` before the integer branch so Connect's boolean is trusted as-is and Nexa's integer codes still decode correctly.
+
 ## v3.0.3 (2026-05-03)
 
 ### Fixed

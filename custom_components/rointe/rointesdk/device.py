@@ -155,17 +155,17 @@ class RointeDevice:
             data.get("nominal_effective_power", self.nominal_power)
         )
         power_val = data.get("power", False)
-        power_int: int | None
-        try:
-            power_int = int(power_val)
-        except (TypeError, ValueError):
-            power_int = None
         status = data.get("status", "none")
         if status == "off":
             self.power = False
-        elif power_int is not None:
-            # Nexa uses 1=standby/off, 2=on/heating.
-            self.power = power_int == 2
+        elif isinstance(power_val, bool):
+            # Legacy Connect API sends a plain boolean. Check this BEFORE the
+            # int branch because bool is a subclass of int in Python, so a
+            # naive int(True) would yield 1 and be misread as Nexa standby.
+            self.power = power_val
+        elif isinstance(power_val, (int, float)):
+            # Nexa API: 1=standby/off, 2=on/heating.
+            self.power = int(power_val) == 2
         else:
             self.power = bool(power_val)
         self.preset = status
