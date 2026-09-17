@@ -1181,12 +1181,7 @@ class RointeAPI:
             for item in data:
                 if not isinstance(item, dict):
                     continue
-                install_id = (
-                    item.get("id")
-                    or item.get("_id")
-                    or item.get("uuid")
-                    or item.get("installation_id")
-                )
+                install_id = self._nexa_item_id(item)
                 if not install_id:
                     continue
                 name = (
@@ -1211,12 +1206,44 @@ class RointeAPI:
 
         return ApiResponse(True, installations, None)
 
-    def _get_installation_by_id_nexa(self, installation_id: str) -> ApiResponse:
-        """Retrieve a Nexa installation by ID."""
-
-        response, error = self._nexa_authenticated_get(
-            f"{NEXA_INSTALLATIONS_URL}/{installation_id}"
+    @staticmethod
+    def _nexa_item_id(item: Dict[str, Any]) -> Optional[str]:
+        """Extract an installation id from a raw Nexa API list item."""
+        return (
+            item.get("id")
+            or item.get("_id")
+            or item.get("uuid")
+            or item.get("installation_id")
         )
+
+    def _find_nexa_installation(
+        self, data: Any, installation_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Find one installation's raw data by id within a Nexa installations list."""
+
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and self._nexa_item_id(item) == installation_id:
+                    return item
+            return None
+
+        if isinstance(data, dict):
+            item = data.get(installation_id)
+            return item if isinstance(item, dict) else None
+
+        return None
+
+    def _get_installation_by_id_nexa(self, installation_id: str) -> ApiResponse:
+        """Retrieve a Nexa installation by ID.
+
+        The Nexa API has no per-installation detail endpoint: GET
+        .../installations/<id> returns HTTP 418 with body {"message": "Not
+        Found"} for any id. The full installation object (including
+        zones/devices) is only available from the installations list, so fetch
+        that and pick out the matching entry.
+        """
+
+        response, error = self._nexa_authenticated_get(NEXA_INSTALLATIONS_URL)
 
         if error:
             return ApiResponse(False, None, error)
@@ -1245,13 +1272,19 @@ class RointeAPI:
             return ApiResponse(False, None, "Nexa get_installation_by_id invalid JSON")
 
         data = response_json.get("data", response_json)
-        if not isinstance(data, dict):
-            return ApiResponse(False, None, "Nexa get_installation_by_id invalid format")
+        installation = self._find_nexa_installation(data, installation_id)
+
+        if installation is None:
+            return ApiResponse(
+                False,
+                None,
+                f"Nexa installation {installation_id} not found in installations list",
+            )
 
         # Cache zone-device mappings for energy attribution
-        self._build_zone_device_map(data)
+        self._build_zone_device_map(installation)
 
-        return ApiResponse(True, data, None)
+        return ApiResponse(True, installation, None)
 
     def _build_zone_device_map(self, installation_data: Dict[str, Any]) -> None:
         """Build zone-to-device mappings from installation data."""
