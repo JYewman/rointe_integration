@@ -68,6 +68,9 @@ class RointeAPI:
         self.use_nexa_ws = False
         self._nexa_device_cache: Dict[str, Dict[str, Any]] = {}
         self._nexa_zone_device_map: Dict[str, List[str]] = {}  # zone_id -> [device_serials]
+        # (token_name, header_name) combo that last worked against the Nexa
+        # installations endpoints; see _nexa_authenticated_get.
+        self._nexa_auth_combo: Optional[tuple[str, str]] = None
         self._nexa_device_zone_map: Dict[str, str] = {}  # device_serial -> zone_id
         self._nexa_installation_energy: Optional[Dict[str, Any]] = None  # cached stats
         self._nexa_energy_lock = threading.Lock()
@@ -1018,11 +1021,18 @@ class RointeAPI:
 
         return ApiResponse(True, None, None)
 
-    def _get_installations_nexa(self) -> ApiResponse:
-        """Retrieve installations from Nexa API."""
+    def _nexa_authenticated_get(
+        self, url: str
+    ) -> tuple[Optional[requests.Response], Optional[str]]:
+        """GET a Nexa installations endpoint, negotiating the auth header format.
 
-        if not self.nexa_token and not self.nexa_refresh_token and not self.auth_token:
-            return ApiResponse(False, None, "Nexa token missing")
+        The Nexa API's expected auth header format isn't documented, so the first
+        call probes token/header combinations until one returns something other
+        than 401. Re-probing all combinations on every coordinator refresh (every
+        ROINTE_API_REFRESH_INTERVAL) triggers the API's rate limiting, observed as
+        HTTP 418, so once a combination returns 200 it is cached on the instance
+        and reused directly. A fresh 401 with the cached combo forces re-probing.
+        """
 
         tokens_to_try = []
         if self.nexa_token:
@@ -1032,48 +1042,77 @@ class RointeAPI:
         if self.auth_token:
             tokens_to_try.append(("firebase", self.auth_token))
 
-        header_templates = [
+        if not tokens_to_try:
+            return None, "Nexa token missing"
+
+        header_templates: Dict[str, Any] = {
             # Nexa API uses the 'token' header (not Authorization)
-            ("token-header", lambda t: {"token": t}),
-            ("bearer", lambda t: {"Authorization": f"Bearer {t}"}),
-            ("token", lambda t: {"Authorization": t}),
-            ("x-access-token", lambda t: {"x-access-token": t}),
-            (
-                "bearer+x-access-token",
-                lambda t: {"Authorization": f"Bearer {t}", "x-access-token": t},
-            ),
-            ("token+x-access-token", lambda t: {"Authorization": t, "x-access-token": t}),
-        ]
+            "token-header": lambda t: {"token": t},
+            "bearer": lambda t: {"Authorization": f"Bearer {t}"},
+            "token": lambda t: {"Authorization": t},
+            "x-access-token": lambda t: {"x-access-token": t},
+            "bearer+x-access-token": lambda t: {
+                "Authorization": f"Bearer {t}",
+                "x-access-token": t,
+            },
+            "token+x-access-token": lambda t: {"Authorization": t, "x-access-token": t},
+        }
+        tokens_by_name = dict(tokens_to_try)
+
+        if self._nexa_auth_combo:
+            cached_token_name, cached_header_name = self._nexa_auth_combo
+            token_value = tokens_by_name.get(cached_token_name)
+            if token_value is not None:
+                headers = {"Accept": "application/json"}
+                headers.update(header_templates[cached_header_name](token_value))
+                try:
+                    response = requests.get(
+                        url, headers=headers, timeout=AUTH_TIMEOUT_SECONDS
+                    )
+                except RequestException as e:
+                    return None, f"Network error {e}"
+                if response.status_code != 401:
+                    return response, None
+                # Cached combo is no longer accepted - re-probe below.
+                self._nexa_auth_combo = None
 
         response = None
         for token_name, token_value in tokens_to_try:
-            for header_name, header_builder in header_templates:
+            for header_name, header_builder in header_templates.items():
                 headers = {"Accept": "application/json"}
                 headers.update(header_builder(token_value))
                 try:
                     response = requests.get(
-                        NEXA_INSTALLATIONS_URL,
-                        headers=headers,
-                        timeout=AUTH_TIMEOUT_SECONDS,
+                        url, headers=headers, timeout=AUTH_TIMEOUT_SECONDS
                     )
                 except RequestException as e:
-                    return ApiResponse(False, None, f"Network error {e}")
+                    return None, f"Network error {e}"
 
-                if response is not None and response.status_code != 401:
+                if response.status_code != 401:
                     LOGGER.debug(
-                        "Nexa get_installations using %s token with %s headers",
+                        "Nexa auth negotiation succeeded using %s token with %s headers",
                         token_name,
                         header_name,
                     )
-                    break
+                    if response.status_code == 200:
+                        self._nexa_auth_combo = (token_name, header_name)
+                    return response, None
 
                 LOGGER.debug(
-                    "Nexa get_installations 401 using %s token with %s headers",
+                    "Nexa auth negotiation got 401 using %s token with %s headers",
                     token_name,
                     header_name,
                 )
-            if response is not None and response.status_code != 401:
-                break
+
+        return None, "No response from Nexa API"
+
+    def _get_installations_nexa(self) -> ApiResponse:
+        """Retrieve installations from Nexa API."""
+
+        response, error = self._nexa_authenticated_get(NEXA_INSTALLATIONS_URL)
+
+        if error:
+            return ApiResponse(False, None, error)
 
         if response is None:
             return ApiResponse(
@@ -1138,58 +1177,12 @@ class RointeAPI:
     def _get_installation_by_id_nexa(self, installation_id: str) -> ApiResponse:
         """Retrieve a Nexa installation by ID."""
 
-        if not self.nexa_token and not self.nexa_refresh_token and not self.auth_token:
-            return ApiResponse(False, None, "Nexa token missing")
+        response, error = self._nexa_authenticated_get(
+            f"{NEXA_INSTALLATIONS_URL}/{installation_id}"
+        )
 
-        tokens_to_try = []
-        if self.nexa_token:
-            tokens_to_try.append(("nexa", self.nexa_token))
-        if self.nexa_refresh_token:
-            tokens_to_try.append(("nexa_refresh", self.nexa_refresh_token))
-        if self.auth_token:
-            tokens_to_try.append(("firebase", self.auth_token))
-
-        header_templates = [
-            # Nexa API uses the 'token' header (not Authorization)
-            ("token-header", lambda t: {"token": t}),
-            ("bearer", lambda t: {"Authorization": f"Bearer {t}"}),
-            ("token", lambda t: {"Authorization": t}),
-            ("x-access-token", lambda t: {"x-access-token": t}),
-            (
-                "bearer+x-access-token",
-                lambda t: {"Authorization": f"Bearer {t}", "x-access-token": t},
-            ),
-            ("token+x-access-token", lambda t: {"Authorization": t, "x-access-token": t}),
-        ]
-
-        response = None
-        for token_name, token_value in tokens_to_try:
-            for header_name, header_builder in header_templates:
-                headers = {"Accept": "application/json"}
-                headers.update(header_builder(token_value))
-                try:
-                    response = requests.get(
-                        f"{NEXA_INSTALLATIONS_URL}/{installation_id}",
-                        headers=headers,
-                        timeout=AUTH_TIMEOUT_SECONDS,
-                    )
-                except RequestException as e:
-                    return ApiResponse(False, None, f"Network error {e}")
-
-                if response is not None and response.status_code != 401:
-                    LOGGER.debug(
-                        "Nexa get_installation_by_id using %s token with %s headers",
-                        token_name,
-                        header_name,
-                    )
-                    break
-                LOGGER.debug(
-                    "Nexa get_installation_by_id 401 using %s token with %s headers",
-                    token_name,
-                    header_name,
-                )
-            if response is not None and response.status_code != 401:
-                break
+        if error:
+            return ApiResponse(False, None, error)
 
         if response is None:
             return ApiResponse(
