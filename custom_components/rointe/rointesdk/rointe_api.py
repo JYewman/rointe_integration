@@ -43,10 +43,6 @@ from .utils import build_update_map
 ApiResponse = namedtuple("ApiResponse", ["success", "data", "error_message"])
 LOGGER = logging.getLogger(__name__)
 
-# How long to suppress Nexa auth-header negotiation after a full probe pass
-# fails to find a working combination (e.g. the API starts rate limiting).
-NEXA_NEGOTIATION_BACKOFF = timedelta(minutes=5)
-
 
 class RointeAPI:
     """Rointe API Communication. Handles low level calls to the API."""
@@ -75,7 +71,6 @@ class RointeAPI:
         # (token_name, header_name) combo that last worked against the Nexa
         # installations endpoints; see _nexa_authenticated_get.
         self._nexa_auth_combo: Optional[tuple[str, str]] = None
-        self._nexa_negotiation_backoff_until: Optional[datetime] = None
         self._nexa_device_zone_map: Dict[str, str] = {}  # device_serial -> zone_id
         self._nexa_installation_energy: Optional[Dict[str, Any]] = None  # cached stats
         self._nexa_energy_lock = threading.Lock()
@@ -1037,23 +1032,7 @@ class RointeAPI:
         ROINTE_API_REFRESH_INTERVAL) triggers the API's rate limiting, observed as
         HTTP 418, so once a combination returns 200 it is cached on the instance
         and reused directly. A fresh 401 with the cached combo forces re-probing.
-
-        If a full negotiation pass doesn't find a working combination (every
-        attempt gets a non-200 response, e.g. rate limiting), further negotiation
-        attempts are suppressed for NEXA_NEGOTIATION_BACKOFF so a stuck integration
-        doesn't keep hammering the endpoint with 18 requests every refresh cycle.
         """
-
-        if (
-            not self._nexa_auth_combo
-            and self._nexa_negotiation_backoff_until
-            and datetime.now() < self._nexa_negotiation_backoff_until
-        ):
-            return None, (
-                "Nexa auth negotiation is backing off after failing to find a "
-                f"working combination; retrying after "
-                f"{self._nexa_negotiation_backoff_until.isoformat()}"
-            )
 
         tokens_to_try = []
         if self.nexa_token:
@@ -1097,16 +1076,6 @@ class RointeAPI:
                 # Cached combo is no longer accepted - re-probe below.
                 self._nexa_auth_combo = None
 
-        if (
-            self._nexa_negotiation_backoff_until
-            and datetime.now() < self._nexa_negotiation_backoff_until
-        ):
-            return None, (
-                "Nexa auth negotiation is backing off after failing to find a "
-                f"working combination; retrying after "
-                f"{self._nexa_negotiation_backoff_until.isoformat()}"
-            )
-
         response = None
         for token_name, token_value in tokens_to_try:
             for header_name, header_builder in header_templates.items():
@@ -1127,11 +1096,6 @@ class RointeAPI:
                     )
                     if response.status_code == 200:
                         self._nexa_auth_combo = (token_name, header_name)
-                        self._nexa_negotiation_backoff_until = None
-                    else:
-                        self._nexa_negotiation_backoff_until = (
-                            datetime.now() + NEXA_NEGOTIATION_BACKOFF
-                        )
                     return response, None
 
                 LOGGER.debug(
@@ -1140,7 +1104,6 @@ class RointeAPI:
                     header_name,
                 )
 
-        self._nexa_negotiation_backoff_until = datetime.now() + NEXA_NEGOTIATION_BACKOFF
         return None, "No response from Nexa API"
 
     def _get_installations_nexa(self) -> ApiResponse:
