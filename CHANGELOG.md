@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.0.5 (2026-09-17)
+
+### Fixed
+- **Deprecated `device_registry.async_get_device` call** — HA now warns that `async_get_device` is deprecated because device identifiers are no longer unique across config entries, and will stop working in HA Core 2027.8.0. `device_update_info` now calls `async_get_device_by_identifier` with the coordinator's `config_entry_id`, which requires the coordinator to be constructed with the config entry (passed through as `config_entry` to `DataUpdateCoordinator`, matching current HA conventions).
+
 ## v3.0.4 (2026-05-06)
 
 ### Fixed

@@ -50,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         rointe_api=rointe_api,
     )
 
-    rointe_coordinator = RointeDataUpdateCoordinator(hass, rointe_device_manager)
+    rointe_coordinator = RointeDataUpdateCoordinator(hass, entry, rointe_device_manager)
 
     await rointe_coordinator.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = rointe_coordinator
