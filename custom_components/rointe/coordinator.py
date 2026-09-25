@@ -10,6 +10,7 @@ from typing import Any
 from .rointesdk.device import RointeDevice
 
 from homeassistant.components.sensor import SensorEntityDescription
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
@@ -43,7 +44,10 @@ class RointeDataUpdateCoordinator(DataUpdateCoordinator[dict[str, RointeDevice]]
     """Rointe data coordinator."""
 
     def __init__(
-        self, hass: HomeAssistant, device_manager: RointeDeviceManager
+        self,
+        hass: HomeAssistant,
+        config_entry: ConfigEntry,
+        device_manager: RointeDeviceManager,
     ) -> None:
         """Initialize Rointe data updater."""
         self.device_manager = device_manager
@@ -52,6 +56,7 @@ class RointeDataUpdateCoordinator(DataUpdateCoordinator[dict[str, RointeDevice]]
         super().__init__(
             hass,
             LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
             update_interval=ROINTE_API_REFRESH_INTERVAL,
         )
@@ -83,7 +88,7 @@ class RointeDataUpdateCoordinator(DataUpdateCoordinator[dict[str, RointeDevice]]
             )
 
         for device in new_devices.values():
-            device_update_info(self.hass, device)
+            device_update_info(self.hass, self.config_entry.entry_id, device)
 
         return new_devices
 
@@ -152,15 +157,17 @@ class RointeDataUpdateCoordinator(DataUpdateCoordinator[dict[str, RointeDevice]]
 
 
 @callback
-def device_update_info(hass: HomeAssistant, rointe_device: RointeDevice) -> None:
+def device_update_info(
+    hass: HomeAssistant, config_entry_id: str, rointe_device: RointeDevice
+) -> None:
     """Update device registry info."""
 
     LOGGER.debug("Updating device registry info for %s", rointe_device.name)
 
     dev_registry = dr.async_get(hass)
 
-    if device := dev_registry.async_get_device(
-        identifiers={(DOMAIN, rointe_device.id)},
+    if device := dev_registry.async_get_device_by_identifier(
+        (DOMAIN, rointe_device.id), config_entry_id
     ):
         dev_registry.async_update_device(
             device.id, sw_version=rointe_device.firmware_version
