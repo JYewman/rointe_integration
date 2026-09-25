@@ -59,27 +59,34 @@ def _get_heating_status(device: RointeDevice) -> str:
 
 
 def _get_effective_power(device: RointeDevice) -> float:
-    """Get effective power usage, accounting for stale Firebase data."""
+    """Get effective power usage, accounting for stale Firebase data.
+
+    Mirrors RointeClimate.hvac_action: status_warming can be stale (stuck
+    reporting off/maintaining while the device is actually actively heating),
+    so "should be heating" is derived from power + temperature differential
+    rather than trusted device state. Once that derivation says heating,
+    status_warming is only used to detect the lower-power "maintaining"
+    state, never to zero the result back out.
+    """
     # If device is off or target temp reached, power is 0
     if not device.power:
         return 0
-    
+
     target = device.get_effective_target_temperature()
     # If current temp >= target, not heating (regardless of stale status_warming)
     if device.temp_probe >= target:
         return 0
-    
+
     # Check energy_data first
     if device.energy_data and device.energy_data.effective_power > 0:
         return device.energy_data.effective_power
-    
-    # Use status_warming only if temp check says we should be heating
-    if device.status_warming == 2:
-        return device.nominal_effective_power
-    elif device.status_warming == 1:
+
+    # We've independently determined the device should be actively heating -
+    # status_warming only refines this to the lower "maintaining" power.
+    if device.status_warming == 1:
         return device.nominal_effective_power * 0.5
-    
-    return 0
+
+    return device.nominal_effective_power
 
 
 def _get_schedule_status(device: RointeDevice) -> str:
