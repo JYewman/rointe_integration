@@ -5,9 +5,7 @@ from __future__ import annotations
 from collections import namedtuple
 import json
 import logging
-import ssl
 import threading
-import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +14,7 @@ from requests.exceptions import RequestException
 
 from .device import RointeDevice, ScheduleMode
 from .dto import EnergyConsumptionData
+from .nexa_ws import NexaWebSocket
 from .settings import (
     AUTH_ACCT_INFO_URL,
     AUTH_HOST,
@@ -74,6 +73,7 @@ class RointeAPI:
         self._nexa_device_zone_map: Dict[str, str] = {}  # device_serial -> zone_id
         self._nexa_installation_energy: Optional[Dict[str, Any]] = None  # cached stats
         self._nexa_energy_lock = threading.Lock()
+        self._nexa_ws: Optional[NexaWebSocket] = None
 
     def initialize_authentication(self) -> ApiResponse:
         """
@@ -1437,6 +1437,36 @@ class RointeAPI:
             None,
         )
 
+    def _get_nexa_ws(self) -> Optional[NexaWebSocket]:
+        """Return the shared Nexa WebSocket, creating it on first use."""
+
+        if not self.firebase_ws_url:
+            return None
+        if self._nexa_ws is None:
+            self._nexa_ws = NexaWebSocket(self.firebase_ws_url, self._nexa_ws_token)
+        return self._nexa_ws
+
+    def _nexa_ws_token(self) -> Optional[str]:
+        """Token provider for the WebSocket; refreshes auth when needed."""
+
+        if not self._ensure_valid_auth():
+            return None
+        return self.auth_token
+
+    def _force_nexa_reauth(self) -> None:
+        """Expire the token so the next WebSocket request re-authenticates."""
+
+        self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+        if self._nexa_ws is not None:
+            self._nexa_ws.invalidate_auth()
+
+    def close(self) -> None:
+        """Close the shared Nexa WebSocket, if open."""
+
+        if self._nexa_ws is not None:
+            self._nexa_ws.close()
+            self._nexa_ws = None
+
     def _write_via_websocket(
         self, device_id: str, data: Dict[str, Any], _retry: bool = True
     ) -> ApiResponse:
@@ -1445,15 +1475,9 @@ class RointeAPI:
         if not self._ensure_valid_auth():
             return ApiResponse(False, None, "Invalid authentication.")
 
-        if not self.firebase_ws_url:
+        nexa_ws = self._get_nexa_ws()
+        if nexa_ws is None:
             return ApiResponse(False, None, "No WebSocket URL configured.")
-
-        try:
-            import websocket  # type: ignore
-        except ImportError:
-            return ApiResponse(
-                False, None, "websocket-client is required for Nexa devices."
-            )
 
         fields_to_write: List[tuple[str, Any]] = []
 
@@ -1478,163 +1502,29 @@ class RointeAPI:
             ("last_sync_datetime_app", round(datetime.now().timestamp() * 1000))
         )
 
-        results: Dict[int, Any] = {}
-        auth_holder: dict[str, Any] = {"status": None}
-        errors: List[str] = []
-        auth_id = [0]
-        write_ids: List[int] = []
-        expected_write_responses = [0]
-        ws_done = threading.Event()
-        ws_connected = threading.Event()
-        auth_done = threading.Event()
-        closing = [False]
-
-        def on_message(ws, message):
-            try:
-                msg = json.loads(message)
-                if msg.get("t") == "d" and "d" in msg:
-                    data_block = msg["d"]
-                    req_id = data_block.get("r")
-                    if req_id == auth_id[0] and "b" in data_block:
-                        auth_holder["status"] = data_block["b"].get("s")
-                        auth_done.set()
-                    elif req_id and req_id in write_ids and "b" in data_block:
-                        results[req_id] = data_block["b"].get("s")
-                        if len(results) >= expected_write_responses[0]:
-                            ws_done.set()
-            except Exception:
-                pass
-
-        def on_error(ws, error):
-            if not closing[0] and error:
-                error_str = str(error)
-                if "NoneType" not in error_str:
-                    errors.append(error_str)
-                    auth_done.set()
-                    ws_done.set()
-
-        def on_close(ws, code, msg):
-            auth_done.set()
-            ws_done.set()
-
-        def on_open(ws):
-            ws_connected.set()
-            try:
-                auth_id[0] = 1
-                ws.send(
-                    json.dumps(
-                        {
-                            "t": "d",
-                            "d": {
-                                "r": auth_id[0],
-                                "a": "auth",
-                                "b": {"cred": self.auth_token},
-                            },
-                        }
-                    )
-                )
-            except Exception as e:
-                errors.append(str(e))
-                auth_done.set()
-                ws_done.set()
-
-        def send_writes(ws):
-            """Send write requests after auth is confirmed."""
-            try:
-                next_id = 2
-                for field, value in fields_to_write:
-                    write_ids.append(next_id)
-                    ws.send(
-                        json.dumps(
-                            {
-                                "t": "d",
-                                "d": {
-                                    "r": next_id,
-                                    "a": "p",
-                                    "b": {
-                                        "p": f"/devices/{device_id}/data/{field}",
-                                        "d": value,
-                                    },
-                                },
-                            }
-                        )
-                    )
-                    expected_write_responses[0] += 1
-                    next_id += 1
-                    time.sleep(0.1)
-            except Exception as e:
-                errors.append(str(e))
-                ws_done.set()
-
-        def safe_close(ws):
-            closing[0] = True
-            try:
-                if ws and hasattr(ws, "sock") and ws.sock:
-                    ws.close()
-            except Exception:
-                pass
-
-        ws = websocket.WebSocketApp(
-            self.firebase_ws_url,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-        )
-
-        ws_thread = threading.Thread(
-            target=lambda: ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}),
-            daemon=True,
-        )
-        ws_thread.start()
-
-        if not ws_connected.wait(timeout=5):
-            safe_close(ws)
-            return ApiResponse(False, None, "Connection timeout")
-
-        # Wait for auth response before sending writes
-        if not auth_done.wait(timeout=5):
-            LOGGER.warning("WebSocket write auth response timeout for %s", device_id)
-            safe_close(ws)
-            ws_thread.join(timeout=2)
-            return ApiResponse(False, None, "Auth response timeout")
-
-        if auth_holder["status"] != "ok":
-            LOGGER.warning(
-                "WebSocket write auth failed (status=%s) for %s",
-                auth_holder["status"],
-                device_id,
+        results: Dict[str, Any] = {}
+        for field, value in fields_to_write:
+            response = nexa_ws.request(
+                "p", {"p": f"/devices/{device_id}/data/{field}", "d": value}
             )
-            safe_close(ws)
-            ws_thread.join(timeout=2)
+            if response is None:
+                if _retry:
+                    LOGGER.info("Forcing token refresh and retrying write for %s", device_id)
+                    self._force_nexa_reauth()
+                    return self._write_via_websocket(device_id, data, _retry=False)
+                return ApiResponse(False, None, "WebSocket write failed")
 
-            if _retry:
-                LOGGER.info("Forcing token refresh and retrying write for %s", device_id)
-                self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
-                return self._write_via_websocket(device_id, data, _retry=False)
-            return ApiResponse(False, None, "WebSocket auth failed")
-
-        # Auth succeeded, send writes
-        send_writes(ws)
-
-        ws_done.wait(timeout=8)
-        safe_close(ws)
-        ws_thread.join(timeout=2)
-
-        if errors:
-            return ApiResponse(False, None, "; ".join(errors))
-
-        # Check for permission denied in write results
-        for req_id, status in results.items():
+            status = response.get("s")
             if isinstance(status, str) and "permission_denied" in status.lower():
                 if _retry:
                     LOGGER.info(
                         "Permission denied on write, forcing re-auth and retrying for %s",
                         device_id,
                     )
-                    self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+                    self._force_nexa_reauth()
                     return self._write_via_websocket(device_id, data, _retry=False)
                 return ApiResponse(False, None, "Permission denied after re-auth")
+            results[field] = status
 
         return ApiResponse(True, results, None)
 
@@ -1654,178 +1544,37 @@ class RointeAPI:
         if not self._ensure_valid_auth():
             return None
 
-        if not self.firebase_ws_url:
+        nexa_ws = self._get_nexa_ws()
+        if nexa_ws is None:
             return None
 
-        try:
-            import websocket  # type: ignore
-        except ImportError:
-            LOGGER.error("websocket-client is required for Nexa devices.")
-            return None
-
-        result_holder: dict[str, Any] = {"data": None}
-        auth_holder: dict[str, Any] = {"status": None}
-        errors: List[str] = []
-        auth_id = [0]
-        read_id = [0]
-        ws_done = threading.Event()
-        ws_connected = threading.Event()
-        auth_done = threading.Event()
-        closing = [False]
-
-        def on_message(ws, message):
-            try:
-                msg = json.loads(message)
-                if msg.get("t") == "d" and "d" in msg:
-                    data_block = msg["d"]
-                    req_id = data_block.get("r")
-                    if req_id == auth_id[0] and "b" in data_block:
-                        auth_holder["status"] = data_block["b"].get("s")
-                        auth_done.set()
-                    elif req_id == read_id[0] and "b" in data_block:
-                        result_holder["data"] = data_block["b"].get("d")
-                        if isinstance(result_holder["data"], dict):
-                            LOGGER.debug(
-                                "WebSocket read keys for %s: %s",
-                                path,
-                                list(result_holder["data"].keys()),
-                            )
-                        elif isinstance(result_holder["data"], str) and "permission denied" in result_holder["data"].lower():
-                            LOGGER.warning(
-                                "WebSocket read permission denied for %s",
-                                path,
-                            )
-                        else:
-                            LOGGER.debug(
-                                "WebSocket read for %s: type=%s value=%s",
-                                path,
-                                type(result_holder["data"]).__name__,
-                                str(result_holder["data"])[:200],
-                            )
-                        ws_done.set()
-            except Exception:
-                pass
-
-        def on_error(ws, error):
-            if not closing[0] and error:
-                error_str = str(error)
-                if "NoneType" not in error_str:
-                    errors.append(error_str)
-                    auth_done.set()
-                    ws_done.set()
-
-        def on_close(ws, code, msg):
-            auth_done.set()
-            ws_done.set()
-
-        def on_open(ws):
-            ws_connected.set()
-            try:
-                auth_id[0] = 1
-                ws.send(
-                    json.dumps(
-                        {
-                            "t": "d",
-                            "d": {
-                                "r": auth_id[0],
-                                "a": "auth",
-                                "b": {"cred": self.auth_token},
-                            },
-                        }
-                    )
-                )
-            except Exception as e:
-                errors.append(str(e))
-                auth_done.set()
-                ws_done.set()
-
-        def send_read(ws):
-            """Send the read request after auth is confirmed."""
-            try:
-                read_id[0] = 2
-                ws.send(
-                    json.dumps(
-                        {
-                            "t": "d",
-                            "d": {
-                                "r": read_id[0],
-                                "a": "g",
-                                "b": {"p": path},
-                            },
-                        }
-                    )
-                )
-            except Exception as e:
-                errors.append(str(e))
-                ws_done.set()
-
-        def safe_close(ws):
-            closing[0] = True
-            try:
-                if ws and hasattr(ws, "sock") and ws.sock:
-                    ws.close()
-            except Exception:
-                pass
-
-        ws = websocket.WebSocketApp(
-            self.firebase_ws_url,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close,
-        )
-
-        ws_thread = threading.Thread(
-            target=lambda: ws.run_forever(sslopt={"cert_reqs": ssl.CERT_NONE}),
-            daemon=True,
-        )
-        ws_thread.start()
-
-        if not ws_connected.wait(timeout=5):
-            safe_close(ws)
-            return None
-
-        # Wait for auth response
-        if not auth_done.wait(timeout=5):
-            LOGGER.warning("WebSocket auth response timeout for %s", path)
-            safe_close(ws)
-            ws_thread.join(timeout=2)
-            return None
-
-        if auth_holder["status"] != "ok":
-            LOGGER.warning(
-                "WebSocket auth failed (status=%s) for %s",
-                auth_holder["status"],
-                path,
-            )
-            safe_close(ws)
-            ws_thread.join(timeout=2)
-
-            # Force token expiry so next call triggers re-auth
+        response = nexa_ws.request("g", {"p": path})
+        if response is None:
             if _retry:
                 LOGGER.info("Forcing token refresh and retrying read for %s", path)
-                self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+                self._force_nexa_reauth()
                 return self._read_via_websocket(path, _retry=False)
+            LOGGER.error("WebSocket read failed for %s", path)
             return None
 
-        # Auth succeeded, send the read request
-        send_read(ws)
-
-        ws_done.wait(timeout=8)
-        safe_close(ws)
-        ws_thread.join(timeout=2)
-
-        if errors:
-            LOGGER.error("WebSocket read error: %s", "; ".join(errors))
-            return None
+        data = response.get("d")
+        if isinstance(data, dict):
+            LOGGER.debug("WebSocket read keys for %s: %s", path, list(data.keys()))
+        else:
+            LOGGER.debug(
+                "WebSocket read for %s: type=%s value=%s",
+                path,
+                type(data).__name__,
+                str(data)[:200],
+            )
 
         # Check for permission denied in read response
-        if isinstance(result_holder["data"], str) and "permission denied" in result_holder["data"].lower():
+        if isinstance(data, str) and "permission denied" in data.lower():
             if _retry:
                 LOGGER.info("Permission denied on read, forcing re-auth and retrying for %s", path)
-                self.auth_token_expire_date = datetime.now() - timedelta(seconds=1)
+                self._force_nexa_reauth()
                 return self._read_via_websocket(path, _retry=False)
             LOGGER.error("Permission denied on read after re-auth for %s", path)
             return None
 
-        return result_holder["data"]
+        return data
