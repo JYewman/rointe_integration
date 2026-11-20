@@ -58,7 +58,7 @@ class RointeHaClimate(RointeRadiatorEntity, ClimateEntity):
     """Climate entity."""
 
     _attr_icon = "mdi:radiator"
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
     )
@@ -79,7 +79,7 @@ class RointeHaClimate(RointeRadiatorEntity, ClimateEntity):
         super().__init__(coordinator, radiator, unique_id=radiator.id)
 
     @property
-    def target_temperature(self) -> float | None:
+    def native_target_temperature(self) -> float | None:
         """Return the current target temperature or None if the device is off."""
 
         # Check if device is off
@@ -94,7 +94,7 @@ class RointeHaClimate(RointeRadiatorEntity, ClimateEntity):
         return self._radiator.temp
 
     @property
-    def current_temperature(self) -> float:
+    def native_current_temperature(self) -> float:
         """Get current temperature (Probe)."""
         return self._radiator.temp_probe
 

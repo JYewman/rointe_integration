@@ -2,6 +2,6 @@
   "name": "Rointe Heaters",
   "content_in_root": false,
   "render_readme": true,
-  "homeassistant": "2024.1.0",
+  "homeassistant": "2026.11.0",
   "country": ["ES", "GB", "PT", "FR", "IT", "DE"]
 }
